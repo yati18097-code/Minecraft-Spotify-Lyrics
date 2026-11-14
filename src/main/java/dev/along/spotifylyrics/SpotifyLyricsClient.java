@@ -165,3 +165,4 @@ public class SpotifyLyricsClient implements ClientModInitializer {
         currentLyric = "";
         nextLyric = "";
             }
+}
