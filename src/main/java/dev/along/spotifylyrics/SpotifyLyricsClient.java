@@ -9,19 +9,14 @@ import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.resources.Identifier;
-import org.freedesktop.dbus.connections.impl.DBusConnection;
-import org.freedesktop.dbus.connections.impl.DBusConnectionBuilder;
-import org.freedesktop.dbus.exceptions.DBusException;
-import org.freedesktop.dbus.interfaces.DBus;
 
-import java.io.IOException;
 import java.net.http.HttpResponse;
 import java.util.List;
 
 public class SpotifyLyricsClient implements ClientModInitializer {
 
     private static String previousLyric = "";
-    private static String currentLyric = "Spotify Lyrics";
+    private static String currentLyric = "Spotify Lyrics (Android Ready)";
     private static String nextLyric = "";
 
     private static final int MARGIN = 15;
@@ -31,35 +26,19 @@ public class SpotifyLyricsClient implements ClientModInitializer {
     private static LyricsManager lyricsManager;
     private static List<LyricsLine> lyrics;
     private static String currentTrack = "";
-    String osName;
+    private static boolean isFetchingLyrics = false;
 
     @Override
     public void onInitializeClient() {
         try {
-            osName = System.getProperty("os.name").toLowerCase();
-
-            if (osName.contains("win")) {
-                spotifyManager = new WindowsMusicManager();
-            } else if (osName.contains("linux") || osName.contains("nix")
-                    || osName.contains("nux") || osName.contains("mac")) {
-                spotifyManager = new LinuxMusicManager();
-            } else {
-                throw new UnsupportedOperationException(
-                        "Unsupported operating system: " + osName
-                );
-            }
-
-            lyricsManager = new LyricsManager();
-            lyricsManager = new LyricsManager();
-        } catch (DBusException e) {
-            System.err.println("Spotify lyrics, could not connect via DBus to Spotify");
-            spotifyManager = null;
+            spotifyManager = new AndroidSpotifyManager();
             lyricsManager = new LyricsManager();
         } catch (Exception e) {
             System.err.println("Spotify Lyrics: failed to initialize");
             spotifyManager = null;
             lyricsManager = new LyricsManager();
         }
+
         HudElementRegistry.attachElementAfter(
                 VanillaHudElements.CHAT,
                 Identifier.fromNamespaceAndPath(
@@ -68,28 +47,9 @@ public class SpotifyLyricsClient implements ClientModInitializer {
                 ),
                 SpotifyLyricsClient::renderLyrics
         );
+
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-
-            if(osName.contains("nix")) {
-                boolean isOpen = !(spotifyManager == null);
-                if (!isOpen) {
-                    String targetSessionService = "org.mpris.MediaPlayer2.spotify";
-
-                    try (DBusConnection connection = DBusConnectionBuilder.forSessionBus().build()) {
-                        DBus dbus = connection.getRemoteObject("org.freedesktop.DBus", "/", DBus.class);
-                        isOpen = dbus.NameHasOwner(targetSessionService);
-                        if (isOpen) {
-                            spotifyManager = new LinuxMusicManager();
-                            System.out.println("Created Spotify manager");
-                        }
-                    } catch (DBusException | IOException e) {
-
-                    } catch (Exception e) {
-                        System.err.println("Spotify lyrics, could not connect via DBus to Spotify");
-
-                    }
-                }
-            }
+            if (spotifyManager == null) return;
 
             String artist;
             String title;
@@ -102,8 +62,7 @@ public class SpotifyLyricsClient implements ClientModInitializer {
                 return;
             }
 
-            if (artist == null || artist.isBlank()
-                    || title == null || title.isBlank()) {
+            if (artist == null || artist.isBlank() || title == null || title.isBlank()) {
                 return;
             }
 
@@ -111,32 +70,39 @@ public class SpotifyLyricsClient implements ClientModInitializer {
 
             if (!track.equals(currentTrack)) {
                 currentTrack = track;
-
-                System.out.println("SONG CHANGED: " + currentTrack);
-
                 currentLine = null;
+                lyrics = null;
                 clearLyrics();
+                setCurrentLyric("Mencari lirik: " + title + "...");
 
-                try {
-                    HttpResponse<String> response = lyricsManager.fetchLyrics(
-                            artist,
-                            title,
-                            spotifyManager.getAlbum(),
-                            spotifyManager.getDuration()
-                    );
+                if (!isFetchingLyrics) {
+                    isFetchingLyrics = true;
+                    final String fArtist = artist;
+                    final String fTitle = title;
+                    final String fAlbum = spotifyManager.getAlbum();
+                    final long fDuration = spotifyManager.getDuration();
 
-                    String syncedLyrics =
-                            lyricsManager.getSyncedLyrics(response);
-
-                    lyrics = lyricsManager.parseLyrics(syncedLyrics);
-
-                    System.out.println("Lyrics lines: " + lyrics.size());
-
-                } catch (Exception e) {
-                    e.printStackTrace();
-                    lyrics = null;
+                    new Thread(() -> {
+                        try {
+                            HttpResponse<String> response = lyricsManager.fetchLyrics(
+                                    fArtist, fTitle, fAlbum, fDuration
+                            );
+                            String syncedLyrics = lyricsManager.getSyncedLyrics(response);
+                            List<LyricsLine> parsed = lyricsManager.parseLyrics(syncedLyrics);
+                            lyrics = parsed;
+                            if (parsed == null || parsed.isEmpty()) {
+                                setCurrentLyric("Lirik tidak ditemukan");
+                            } else {
+                                clearLyrics();
+                            }
+                        } catch (Exception e) {
+                            lyrics = null;
+                            setCurrentLyric("Gagal memuat lirik");
+                        } finally {
+                            isFetchingLyrics = false;
+                        }
+                    }).start();
                 }
-
                 return;
             }
 
@@ -144,11 +110,8 @@ public class SpotifyLyricsClient implements ClientModInitializer {
                 return;
             }
 
-
             long position = spotifyManager.getPosition();
-
-            int currentIndex =
-                    lyricsManager.getCurrentLineIndex(lyrics, position);
+            int currentIndex = lyricsManager.getCurrentLineIndex(lyrics, position);
 
             if (currentIndex == -1) {
                 return;
@@ -156,34 +119,17 @@ public class SpotifyLyricsClient implements ClientModInitializer {
 
             LyricsLine current = lyrics.get(currentIndex);
 
-            if (currentLine == null ||
-                    current.getTimeStamp() != currentLine.getTimeStamp()) {
-
+            if (currentLine == null || current.getTimeStamp() != currentLine.getTimeStamp()) {
                 currentLine = current;
 
-                String previous =
-                        currentIndex > 0
-                                ? lyrics.get(currentIndex - 1).getText()
-                                : "";
+                String previous = currentIndex > 0 ? lyrics.get(currentIndex - 1).getText() : "";
+                String next = currentIndex < lyrics.size() - 1 ? lyrics.get(currentIndex + 1).getText() : "";
 
-                String next =
-                        currentIndex < lyrics.size() - 1
-                                ? lyrics.get(currentIndex + 1).getText()
-                                : "";
-
-                setLyrics(
-                        previous,
-                        current.getText(),
-                        next
-                );
-
-                System.out.println(
-                        "LYRIC [" + position + "ms]: "
-                                + current.getText()
-                );
+                setLyrics(previous, current.getText(), next);
             }
-        })
-    ;}
+        });
+    }
+
     private static void renderLyrics(
             GuiGraphicsExtractor graphics,
             DeltaTracker deltaTracker
@@ -193,48 +139,18 @@ public class SpotifyLyricsClient implements ClientModInitializer {
         int x = MARGIN;
         int y = MARGIN;
 
-        // Previous lyric
         if (!previousLyric.isEmpty()) {
-            graphics.text(
-                    minecraft.font,
-                    previousLyric,
-                    x,
-                    y,
-                    0x99FFFFFF,
-                    true
-            );
+            graphics.text(minecraft.font, previousLyric, x, y, 0x99FFFFFF, true);
         }
 
-        // Current lyric
-        graphics.text(
-                minecraft.font,
-                currentLyric,
-                x,
-                y + LINE_SPACING,
-                0xFFFFFFFF,
-                true
-        );
+        graphics.text(minecraft.font, currentLyric, x, y + LINE_SPACING, 0xFFFFFFFF, true);
 
-        // Next lyric
         if (!nextLyric.isEmpty()) {
-            graphics.text(
-                    minecraft.font,
-                    nextLyric,
-                    x,
-                    y + LINE_SPACING * 2,
-                    0x99FFFFFF,
-                    true
-            );
+            graphics.text(minecraft.font, nextLyric, x, y + LINE_SPACING * 2, 0x99FFFFFF, true);
         }
     }
 
-    // ===== Backend API =====
-
-    public static void setLyrics(
-            String previous,
-            String current,
-            String next
-    ) {
+    public static void setLyrics(String previous, String current, String next) {
         previousLyric = previous;
         currentLyric = current;
         nextLyric = next;
@@ -248,5 +164,4 @@ public class SpotifyLyricsClient implements ClientModInitializer {
         previousLyric = "";
         currentLyric = "";
         nextLyric = "";
-    }
-}
+            }
