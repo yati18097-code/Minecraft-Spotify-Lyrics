@@ -36,7 +36,7 @@ The mod is client-side, so it does not need to be installed on a multiplayer ser
 4. Place the downloaded JAR in your Minecraft `mods` folder.
 5. Launch Minecraft using your Fabric installation.
 6. Start Spotify and play a song.
-
+.
 Lyrics will be retrieved automatically when available.
 
 ## 🎧 How It Works
